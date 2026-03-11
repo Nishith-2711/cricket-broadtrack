@@ -1,0 +1,31 @@
+# datasets
+*.zip
+*.yolov8
+Cricket Pitch Keypoints.v4-v4.yolov8/
+cricket_pitch_keypoints_v5.yolov8/
+partial_visibility_dataset/
+input_videos/
+
+# models
+*.pt
+models/*
+!models/README.md
+
+# videos
+*.mp4
+
+# outputs
+output/
+output*
+runs/
+images/
+bt_vis*
+bt_vis_*
+
+# python
+__pycache__/
+*.pyc
+
+# environments
+venv/
+.venv/
