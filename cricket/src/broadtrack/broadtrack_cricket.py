@@ -60,6 +60,7 @@ def draw_keypoints(img, kpts, kconf, kp_threshold, mode=""):
     return vis
 
 
+
 # ─────────────────────────────────────────────────────
 # HISTOGRAM CAMERA CUT DETECTION
 # ─────────────────────────────────────────────────────
@@ -180,12 +181,16 @@ def backproject_to_ground(pts_2d, params, principal_point):
     return np.array(world_pts, dtype=np.float64)
 
 
-def extract_of_features(gray, params, principal_point, image_w, image_h):
+def extract_of_features(gray, params, principal_point, image_w, image_h, yaw_flip=False):
     """
     Extract Shi-Tomasi features within the projected pitch polygon.
     Returns (tracked_pts, tracked_3d) or (None, None) if projection fails.
     """
-    corners_2d, valid = project_points_batch(params, PITCH_CORNERS_3D, principal_point)
+    outer_corners = PITCH_CORNERS_3D[:4].copy()
+    if yaw_flip:
+        outer_corners[:, 0:2] *= -1
+
+    corners_2d, valid = project_points_batch(params, outer_corners, principal_point)
     if not np.all(valid):
         return None, None
 
@@ -397,6 +402,13 @@ def main():
                     info = tracker.get_camera_info()
                     print(f"  [Frame {count}] INITIALIZED: Z={info['position'][2]:.1f}m, "
                           f"hfov={info['hfov_deg']:.0f}°")
+                    
+                    # Also seed optical flow immediately
+                    if args.use_optical_flow and tracker.params is not None:
+                        of_pts, of_3d = extract_of_features(
+                            gray, tracker.params, tracker.principal_point, w, h,
+                            yaw_flip=tracker.yaw_flip
+                        )
                 else:
                     tracker = None
                     mode = "INIT_FAILED"
@@ -409,6 +421,7 @@ def main():
             if yolo_succeeded:
                 reproj_err, new_params = tracker.update(
                     keypoints_2d, keypoints_3d,
+                    rotation_weight=args.rotation_penalty,
                     edge_points=edge_points,
                     use_lines=args.use_lines,
                     use_predictive_anchors=args.use_predictive_anchors
@@ -425,7 +438,8 @@ def main():
                     # Refresh optical flow features on every successful YOLO frame
                     if args.use_optical_flow and tracker.params is not None:
                         of_pts, of_3d = extract_of_features(
-                            gray, tracker.params, tracker.principal_point, w, h
+                            gray, tracker.params, tracker.principal_point, w, h,
+                            yaw_flip=tracker.yaw_flip
                         )
                         if of_pts is not None and count % 30 == 0:
                             print(f"  [Frame {count}] OF refreshed: {len(of_pts)} features")
@@ -448,8 +462,18 @@ def main():
                     flow_2d = of_pts.reshape(-1, 2).astype(np.float64)
                     flow_3d = of_3d.astype(np.float64)
 
+                    # backproject_to_ground returns 3D in the tracker's
+                    # internal frame (already flipped when yaw_flip=True).
+                    # tracker.update() will flip again, so undo the flip here
+                    # so the net result is a single flip inside update().
+                    if tracker.yaw_flip:
+                        flow_3d = flow_3d.copy()
+                        flow_3d[:, 0] *= -1
+                        flow_3d[:, 1] *= -1
+
                     reproj_err, new_params = tracker.update(
                         flow_2d, flow_3d,
+                        rotation_weight=5.0, # Flow provides many reliable points, no need for massive stubborness
                         edge_points=edge_points,
                         use_lines=args.use_lines,
                     )
@@ -513,6 +537,7 @@ def main():
                 "horizontalFieldOfViewDegrees": info["hfov_deg"],
                 "rvec": params[0:3].tolist(),
                 "tvec": params[3:6].tolist(),
+                "yaw_flip": tracker.yaw_flip,
             })
 
             if mode == "INIT" or mode == "REINIT":
@@ -535,6 +560,7 @@ def main():
                 vis = draw_keypoints(frame, all_kpts, all_kconf, args.kp_conf, mode)
             else:
                 vis = frame.copy()
+
                 
             # Draw Pitch Edges
             if len(edge_points) > 1:

@@ -7,9 +7,8 @@ import argparse
 import sys
 
 # Add parent dir to path to import if needed, but we use local config
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from cricket.src import config
 
+from broadtrack import config
 
 def pan_tilt_roll_to_orientation(pan, tilt, roll):
     """

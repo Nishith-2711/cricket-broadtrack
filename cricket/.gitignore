@@ -29,3 +29,13 @@ __pycache__/
 # environments
 venv/
 .venv/
+
+# Extra specific output folders1
+AR output/
+evaluations_output/
+final_sam_outputs/
+sam_output_json/
+sam_vis/
+videos/
+output_jsons/
+.agents/

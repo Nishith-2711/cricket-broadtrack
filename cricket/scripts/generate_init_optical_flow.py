@@ -8,9 +8,8 @@ from ultralytics import YOLO
 import math
 
 # Add parent dir to path to import if needed, but we use local config
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from cricket.src import config
 
+from broadtrack import config
 
 def estimate_pose_pnp(image_points, object_points, frame_width, frame_height, prev_rvec=None, prev_tvec=None, hfov_deg=60.0):
     """

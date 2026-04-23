@@ -68,24 +68,41 @@ def draw_keypoints(img, kpts, kconf, kp_threshold, mode=""):
 # HISTOGRAM CAMERA CUT DETECTION
 # ─────────────────────────────────────────────────────
 
-def detect_camera_cut(prev_gray, curr_gray, threshold=0.4):
-    """Detect camera cut via histogram correlation + mean absolute difference.
+def detect_camera_cut(prev_gray, curr_gray, prev_mask=None, curr_mask=None,
+                      hist_threshold=0.4, mask_iou_threshold=0.3):
+    """Detect camera cut using histogram, pixel diff, AND SAM mask IoU.
 
-    Histogram alone fails on cricket footage because both sides of a cut share
-    similar outdoor green-grass brightness distributions.  Adding a pixel-level
-    MAD check catches hard cuts that histogram misses.
+    Histogram and pixel-level checks fail on cricket footage because both sides
+    of a cut are green-grass outdoor scenes with similar intensity distributions.
+    The SAM mask shape, however, changes drastically on a cut (different zoom,
+    framing, pitch region).  Low mask IoU is the strongest signal.
     """
+    # 1. Histogram correlation (catches extreme colour shifts)
     hist1 = cv2.calcHist([prev_gray], [0], None, [64], [0, 256])
     hist2 = cv2.calcHist([curr_gray], [0], None, [64], [0, 256])
     cv2.normalize(hist1, hist1)
     cv2.normalize(hist2, hist2)
     hist_score = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
 
-    # Mean absolute pixel difference (normalised 0-1).
-    # A hard broadcast cut typically produces MAD > 0.15.
+    # 2. Mean absolute pixel difference
     mad = np.mean(np.abs(prev_gray.astype(np.float32) - curr_gray.astype(np.float32))) / 255.0
 
-    return hist_score < threshold or mad > 0.15
+    # 3. SAM mask IoU — the strongest signal for cricket broadcasts
+    mask_cut = False
+    if prev_mask is not None and curr_mask is not None:
+        prev_bin = prev_mask > 127
+        curr_bin = curr_mask > 127
+        intersection = np.sum(prev_bin & curr_bin)
+        union = np.sum(prev_bin | curr_bin)
+        iou = intersection / max(union, 1)
+        mask_cut = iou < mask_iou_threshold
+
+    # Pixel signals (histogram + MAD) must agree there's a change.
+    # mask_cut alone is NOT sufficient — SAM can produce inconsistent masks
+    # on consecutive identical frames (different region selected), which would
+    # cause false resets if we trusted mask IoU unconditionally.
+    pixel_cut = hist_score < hist_threshold or mad > 0.15
+    return pixel_cut or (mask_cut and mad > 0.05)
 
 
 # ─────────────────────────────────────────────────────
@@ -272,6 +289,8 @@ def main():
     parser.add_argument('--vis-dir', default='sam_vis', help='Visualization output dir')
     parser.add_argument('--use-lines', action='store_true', default=True, help='Use SAM edge constraints (default: True)')
     parser.add_argument('--no-lines', dest='use_lines', action='store_false', help='Disable SAM edge constraints for debugging')
+    parser.add_argument('--mask-erode', type=int, default=41, help='Kernel size for SAM mask erosion (shrinks mask inward, 0=disabled)')
+    parser.add_argument('--mask-erode-iters', type=int, default=2, help='Number of erosion iterations')
     args = parser.parse_args()
 
     if not args.video and not args.images:
@@ -328,6 +347,7 @@ def main():
     
     # Persistent state for temporally smoothing SAM masks
     ema_mask = None
+    prev_mask_raw = None  # Raw (un-smoothed) mask for cut detection
 
     # Optical flow state
     of_pts = None
@@ -372,10 +392,19 @@ def main():
         mode = "NONE"
         reproj_err = None
 
-        # 2. Camera cut detection
+        # ─── SAM3 Mask Loading (before cut detection so we can use mask IoU) ───
+        curr_mask_raw = None
+        if count < len(sam_mask_files):
+            curr_mask_raw = cv2.imread(sam_mask_files[count], cv2.IMREAD_GRAYSCALE)
+            if curr_mask_raw is not None and (curr_mask_raw.shape[0] != h or curr_mask_raw.shape[1] != w):
+                curr_mask_raw = cv2.resize(curr_mask_raw, (w, h))
+
+        # 2. Camera cut detection (histogram + pixel diff + SAM mask IoU)
         camera_cut = False
         if prev_gray is not None:
-            camera_cut = detect_camera_cut(prev_gray, gray)
+            camera_cut = detect_camera_cut(prev_gray, gray,
+                                           prev_mask=prev_mask_raw,
+                                           curr_mask=curr_mask_raw)
             if camera_cut:
                 print(f"  [Frame {count}] CAMERA CUT — resetting tracker")
                 tracker = None
@@ -385,26 +414,24 @@ def main():
                 ema_mask = None       # Reset SAM mask accumulator
                 ema_kpts = [None] * 8 # Reset keypoint EMA too
 
+        # Update prev_mask_raw for next frame's cut detection
+        prev_mask_raw = curr_mask_raw
+
         # 3. Run YOLO (keypoints only)
         results = model(frame, conf=args.conf, verbose=False, device="cpu")
         r = results[0]
 
-        # ─── SAM3 Mask Loading ───
+        # ─── SAM3 Mask EMA Smoothing ───
         edge_points = []
         partial_visibility = False
-        if count < len(sam_mask_files):
-            mask_raw = cv2.imread(sam_mask_files[count], cv2.IMREAD_GRAYSCALE)
-            if mask_raw is not None:
-                # Resize to match frame if needed
-                if mask_raw.shape[0] != h or mask_raw.shape[1] != w:
-                    mask_raw = cv2.resize(mask_raw, (w, h))
-                mask_resized = mask_raw.astype(np.float32) / 255.0
+        if curr_mask_raw is not None:
+            mask_resized = curr_mask_raw.astype(np.float32) / 255.0
 
-                # Temporally smooth
-                if ema_mask is None:
-                    ema_mask = mask_resized.copy()
-                else:
-                    ema_mask = args.ema_alpha * mask_resized + (1 - args.ema_alpha) * ema_mask
+            # Temporally smooth
+            if ema_mask is None:
+                ema_mask = mask_resized.copy()
+            else:
+                ema_mask = args.ema_alpha * mask_resized + (1 - args.ema_alpha) * ema_mask
 
         if ema_mask is not None:
             mask_binary = (ema_mask > 0.5).astype(np.uint8) * 255

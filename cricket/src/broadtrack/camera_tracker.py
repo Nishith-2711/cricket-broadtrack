@@ -11,6 +11,7 @@ Uses scipy.optimize.least_squares (trust-region) with bounds.
 
 import numpy as np
 import cv2
+import math
 from scipy.optimize import least_squares
 
 from camera import (
@@ -72,7 +73,8 @@ def soft_tripod_residuals(params, keypoints_2d, keypoints_3d, principal_point,
                           prev_params=None, position_weight=20.0, focal_weight=0.05,
                           rotation_weight=10.0, k1_weight=0.1,
                           edge_points=None, use_lines=False,
-                          line_weight=1.0, keypoint_weights=None):
+                          line_weight=1.0, keypoint_weights=None,
+                          pitch_corners_3d=None):
     """
     Combined cost function for soft-tripod model.
     """
@@ -109,7 +111,9 @@ def soft_tripod_residuals(params, keypoints_2d, keypoints_3d, principal_point,
         
     # 3. Line residuals (Method A)
     if use_lines and edge_points is not None and len(edge_points) > 0:
-        corners_2d, valid = project_points_batch(params, PITCH_CORNERS_3D, principal_point)
+        if pitch_corners_3d is None:
+            pitch_corners_3d = PITCH_CORNERS_3D
+        corners_2d, valid = project_points_batch(params, pitch_corners_3d, principal_point)
         if np.all(valid):
             c0, c1, c2, c3 = corners_2d[0], corners_2d[1], corners_2d[2], corners_2d[3]
             # Define 4 lines matching pitch outline
@@ -165,6 +169,7 @@ class CameraTracker:
         self.known_tripod_z = None
         
         self.initialized = False
+        self.yaw_flip = False  # If True, negate X/Y world coords (batting/bowling swap)
         
         # Focal bounds
         self.focal_min = focal_from_hfov(self.HFOV_MAX_DEG, image_width)
@@ -207,8 +212,8 @@ class CameraTracker:
         """
         Initialize from YOLO keypoints using PnP.
         
-        Uses a fixed reasonable hfov (25°) for PnP, then lets the
-        optimizer refine all params including focal length.
+        Tries both Standard and 180-degree Flipped orientations to solve
+        batting/bowling end ambiguity.
         """
         if len(keypoints_2d) < 4:
             return False
@@ -216,76 +221,96 @@ class CameraTracker:
         best_reproj = float('inf')
         best_params = None
         
-        # Try a range of hfov values
-        for hfov_deg in range(10, 65, 5):
-            focal = focal_from_hfov(hfov_deg, self.image_width)
-            K = np.array([
-                [focal, 0, self.principal_point[0]],
-                [0, focal, self.principal_point[1]],
-                [0, 0, 1]
-            ], dtype=np.float64)
+        # Try both Standard and Flipped (180 deg rotation) 3D mappings
+        # Flipped negates X and Y since pitch is centered at (0,0)
+        standard_3d = keypoints_3d.astype(np.float64)
+        flipped_3d = standard_3d.copy()
+        flipped_3d[:, 0] *= -1
+        flipped_3d[:, 1] *= -1
+
+        variant_errors = []
+        for i, kp_3d_variant in enumerate([standard_3d, flipped_3d]):
+            variant_name = "STANDARD" if i == 0 else "FLIPPED"
+            # Try a range of hfov values
+            best_variant_reproj = float('inf')
+            best_variant_params = None
             
-            success, rvec, tvec = cv2.solvePnP(
-                keypoints_3d.astype(np.float64),
-                keypoints_2d.astype(np.float64),
-                K, np.zeros(4),
-                flags=cv2.SOLVEPNP_IPPE
-            )
-            
-            if not success:
-                continue
-            
-            R, _ = cv2.Rodrigues(rvec)
-            position = (-R.T @ tvec).flatten()
-            
-            # Broadcast cameras are elevated in the stands (typically 10-30m).
-            # Reject solutions placing the camera below 5m — those are
-            # degenerate PnP flips from near-planar geometry.
-            if position[2] < 5.0:
-                continue
-            
-            # Build initial 8-param vector (clipped to bounds)
-            bounds = self._get_bounds()
-            params0 = np.zeros(8)
-            params0[0:3] = rvec.flatten()
-            params0[3:6] = position
-            
-            # Force PnP initialization to snap back to the known tripod height BEFORE optimizing
-            if self.known_tripod_z is not None:
-                params0[5] = self.known_tripod_z
+            for hfov_deg in range(10, 65, 5):
+                focal = focal_from_hfov(hfov_deg, self.image_width)
+                K = np.array([
+                    [focal, 0, self.principal_point[0]],
+                    [0, focal, self.principal_point[1]],
+                    [0, 0, 1]
+                ], dtype=np.float64)
                 
-            params0[6] = focal
-            params0[7] = 0.0
-            
-            # Clip to bounds to prevent least_squares ValueError crash
-            params0 = np.clip(params0, bounds[0], bounds[1])
-            
-            # Quick optimization (no temporal constraint during init)
-            try:
-                result = least_squares(
-                    soft_tripod_residuals,
-                    params0,
-                    args=(keypoints_2d, keypoints_3d, self.principal_point,
-                          None, 0.0, 0.0),  # No temporal constraint
-                    method='trf',
-                    bounds=bounds,
-                    max_nfev=300
+                success, rvec, tvec = cv2.solvePnP(
+                    kp_3d_variant,
+                    keypoints_2d.astype(np.float64),
+                    K, np.zeros(4),
+                    flags=cv2.SOLVEPNP_IPPE
                 )
-            except ValueError:
-                continue
+                
+                if not success:
+                    continue
+                
+                R, _ = cv2.Rodrigues(rvec)
+                position = (-R.T @ tvec).flatten()
+                
+                # Reject solutions placing camera below 5m (degenerate PnP flips)
+                if position[2] < 5.0:
+                    continue
+                
+                # Build initial 8-param vector
+                bounds = self._get_bounds()
+                params0 = np.zeros(8)
+                params0[0:3] = rvec.flatten()
+                params0[3:6] = position
+                if self.known_tripod_z is not None:
+                    params0[5] = self.known_tripod_z
+                params0[6] = focal
+                params0[7] = 0.0
+                
+                params0 = np.clip(params0, bounds[0], bounds[1])
+                
+                try:
+                    result = least_squares(
+                        soft_tripod_residuals,
+                        params0,
+                        args=(keypoints_2d, kp_3d_variant, self.principal_point,
+                              None, 0.0, 0.0, 0.0, 0.1,
+                              None, False, 1.0, None, 
+                              kp_3d_variant),
+                        method='trf',
+                        bounds=bounds,
+                        max_nfev=300
+                    )
+                    reproj = self._mean_reproj_error(result.x, keypoints_2d, kp_3d_variant)
+                    if reproj < best_variant_reproj:
+                        best_variant_reproj = reproj
+                        best_variant_params = result.x.copy()
+                except ValueError:
+                    continue
             
-            # Score by reproj error
-            reproj = self._mean_reproj_error(result.x, keypoints_2d, keypoints_3d)
+            variant_errors.append(best_variant_reproj)
             
-            if reproj < best_reproj:
-                best_reproj = reproj
-                best_params = result.x.copy()
+            # Apply 0.5px bias to Standard mapping to avoid flickering in symmetric cases
+            score = best_variant_reproj
+            if i == 0:  # STANDARD
+                score -= 0.5
+                
+            if score < best_reproj:
+                best_reproj = score
+                # Store the ACTUAL (unbiased) error for final logging
+                final_error = best_variant_reproj
+                best_params = best_variant_params
+                self.yaw_flip = (i == 1)
         
         if best_params is not None and best_reproj < 50:
             self.params = best_params
             self.prev_params = best_params.copy()
-            self.known_tripod_z = best_params[5]  # Save the resolved tripod height
+            self.known_tripod_z = best_params[5]
             self.initialized = True
+            print(f"  [REINIT] orient={('FLIPPED' if self.yaw_flip else 'STANDARD')}, error={final_error:.2f}px (STD={variant_errors[0]:.1f}, FLP={variant_errors[1]:.1f})")
             return True
         
         return False
@@ -303,11 +328,24 @@ class CameraTracker:
             
         kp_2d = list(keypoints_2d)
         kp_3d = list(keypoints_3d)
+        
+        # Apply detected orientation flip
+        if self.yaw_flip:
+            kp_3d = []
+            for pt in keypoints_3d:
+                kp_3d.append(np.array([-pt[0], -pt[1], pt[2]]))
+        
         kp_weights = [1.0] * len(kp_2d)
         
         # Method B: Predictive Anchoring
         if use_predictive_anchors and self.prev_params is not None and len(kp_2d) < 4:
-            for i, corner in enumerate(PITCH_CORNERS_3D):
+            # Use correctly oriented corners for anchoring
+            anchors_3d = PITCH_CORNERS_3D
+            if self.yaw_flip:
+                anchors_3d = anchors_3d.copy()
+                anchors_3d[:, 0:2] *= -1
+
+            for i, corner in enumerate(anchors_3d):
                 # Check if this corner is already in kp_3d
                 found = any(np.allclose(corner, existing_3d) for existing_3d in kp_3d)
                 if not found:
@@ -321,18 +359,47 @@ class CameraTracker:
         kp_3d = np.array(kp_3d)
         kp_weights = np.array(kp_weights)
         
+        # --- Phase 3: Predictive Validation (Anti-Hallucination) ---
+        if self.prev_params is not None and len(kp_2d) > 0:
+            predicted_2d, valid_proj = project_points_batch(
+                self.prev_params, kp_3d, self.principal_point
+            )
+            if np.all(valid_proj):
+                # Generous threshold (150px) allows fast pans but catches huge batsman hallucinations (300px+)
+                pred_threshold = 150.0 
+                
+                valid_mask = []
+                for i in range(len(kp_2d)):
+                    dist = np.linalg.norm(kp_2d[i] - predicted_2d[i])
+                    # DEBUG PRINT FOR VALIDATION
+                    # print(f"    [PVAL] Point {i}: pred_dist={dist:.1f}px (threshold={pred_threshold})")
+                    valid_mask.append(dist < pred_threshold)
+                
+                valid_mask = np.array(valid_mask)
+                kp_2d = kp_2d[valid_mask]
+                kp_3d = kp_3d[valid_mask]
+                kp_weights = kp_weights[valid_mask]
+
         if len(kp_2d) < 3:
-            return 0.0, self.params.copy()
+            # Return None to explicitly trigger OPT_REJECTED and coasting
+            return None, None
         
         params0 = self.params.copy()
         
         # --- Pass 1: fit with all keypoints ---
+        # Get correctly oriented pitch corners for Method A
+        anchors_3d = PITCH_CORNERS_3D
+        if self.yaw_flip:
+            anchors_3d = anchors_3d.copy()
+            anchors_3d[:, 0:2] *= -1
+
         result = least_squares(
             soft_tripod_residuals,
             params0,
             args=(kp_2d, kp_3d, self.principal_point,
                   self.prev_params, position_weight, focal_weight, rotation_weight,
-                  0.1, edge_points, use_lines, 1.0, kp_weights),
+                  0.1, edge_points, use_lines, 1.0, kp_weights,
+                  anchors_3d),
             method='trf',
             bounds=self._get_bounds(),
             max_nfev=200
@@ -356,7 +423,8 @@ class CameraTracker:
                 new_params,  # warm start from pass 1
                 args=(kp_2d_clean, kp_3d_clean, self.principal_point,
                       self.prev_params, position_weight, focal_weight, rotation_weight,
-                      0.1, edge_points, use_lines, 1.0, kp_weights_clean),
+                      0.1, edge_points, use_lines, 1.0, kp_weights_clean,
+                      anchors_3d),
                 method='trf',
                 bounds=self._get_bounds(),
                 max_nfev=200
@@ -378,13 +446,30 @@ class CameraTracker:
         """Project pitch wireframe using current camera params."""
         if self.params is None:
             return []
-        return project_wireframe(self.params, PITCH_WIREFRAME, self.principal_point)
+        
+        wf = PITCH_WIREFRAME
+        if self.yaw_flip:
+            flipped_wf = []
+            for line in PITCH_WIREFRAME:
+                flipped_line = []
+                for pt in line:
+                    flipped_line.append(np.array([-pt[0], -pt[1], pt[2]]))
+                flipped_wf.append(flipped_line)
+            wf = flipped_wf
+            
+        return project_wireframe(self.params, wf, self.principal_point)
     
     def get_corners_2d(self):
         """Project pitch corners using current camera params."""
         if self.params is None:
             return None, None
-        return project_points_batch(self.params, PITCH_CORNERS_3D, self.principal_point)
+        
+        corners = PITCH_CORNERS_3D
+        if self.yaw_flip:
+            corners = corners.copy()
+            corners[:, 0:2] *= -1
+            
+        return project_points_batch(self.params, corners, self.principal_point)
     
     def get_camera_info(self):
         """Get human-readable camera info."""

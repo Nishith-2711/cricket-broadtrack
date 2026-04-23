@@ -19,8 +19,8 @@ import sys
 import math
 from ultralytics import YOLO
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from cricket.src import config
+from broadtrack import config
+
 
 # ─────────────────────────────────────────────────────
 # PITCH GEOMETRY (2D on Z=0 plane, in meters)

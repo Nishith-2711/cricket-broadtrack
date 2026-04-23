@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "broadtrack"
+version = "0.1.0"
+description = "Geometric Camera Estimation and Stabilization for Broadcast Cricket Footage"
+authors = [
+    {name = "Nishith Hingoo", email = "nh8145@g.rit.edu"},
+]
+dependencies = [
+    "opencv-python",
+    "numpy",
+    "torch",
+    "torchvision",
+    "ultralytics",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

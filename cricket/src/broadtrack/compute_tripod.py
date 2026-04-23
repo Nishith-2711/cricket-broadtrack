@@ -45,7 +45,13 @@ class NumpyEncoder(json.JSONEncoder):
         return json.JSONEncoder.default(self, obj)
 
 
-def extract_camera_rays(json_path, min_score=0.6):
+def extract_camera_rays(
+    json_path,
+    min_score=0.6,
+    allowed_modes=None,
+    max_reproj_px=40.0,
+    min_visible_corners=6,
+):
     """
     Extract camera positions and optical axes from a Pass 1 JSON file.
 
@@ -62,6 +68,20 @@ def extract_camera_rays(json_path, min_score=0.6):
     for key, entry in data.items():
         score = entry.get("score", 0)
         if score < min_score:
+            continue
+
+        mode = entry.get("mode", "")
+        if allowed_modes is not None and mode not in allowed_modes:
+            continue
+
+        # Reject noisy frames before estimating tripod center.
+        # This is crucial for zoomed / partially visible sequences.
+        reproj = entry.get("reproj_error_px", None)
+        if reproj is not None and reproj > max_reproj_px:
+            continue
+
+        vis_corners = entry.get("visible_corners", None)
+        if vis_corners is not None and vis_corners < min_visible_corners:
             continue
 
         cp = entry.get("cp", {})
@@ -205,6 +225,12 @@ def main():
                         help='Output tripod JSON path')
     parser.add_argument('--min-score', type=float, default=0.6,
                         help='Minimum frame score to include')
+    parser.add_argument('--max-reproj', type=float, default=40.0,
+                        help='Maximum reprojection error (px) for included frames')
+    parser.add_argument('--min-visible-corners', type=int, default=6,
+                        help='Minimum visible pitch corners for included frames')
+    parser.add_argument('--radius-floor', type=float, default=0.8,
+                        help='Minimum tripod radius (m) for low-pan fallback')
     args = parser.parse_args()
 
     print(f"\n{'='*60}")
@@ -212,7 +238,13 @@ def main():
     print(f"{'='*60}")
 
     # 1. Extract camera rays from Pass 1 output
-    positions, axes = extract_camera_rays(args.input, args.min_score)
+    positions, axes = extract_camera_rays(
+        args.input,
+        min_score=args.min_score,
+        allowed_modes={"INIT", "REINIT", "OPTIMIZED"},
+        max_reproj_px=args.max_reproj,
+        min_visible_corners=args.min_visible_corners,
+    )
     print(f"  Extracted {len(positions)} well-tracked frames (score > {args.min_score})")
 
     if len(positions) < 3:
@@ -246,7 +278,10 @@ def main():
             center = np.median(positions_arr, axis=0)
         # Estimate radius from position scatter (how much the camera "wobbles")
         dists = np.linalg.norm(positions_arr - center, axis=1)
-        radius = float(np.median(dists))
+        raw_radius = float(np.median(dists))
+        radius = max(raw_radius, args.radius_floor)
+        if radius > raw_radius:
+            print(f"  INFO: Radius floor applied ({raw_radius:.4f} -> {radius:.4f} m)")
         used_sphere_fit = False
     else:
         # 3. Robust mean via MinCovDet on ray intersections
