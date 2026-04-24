@@ -23,8 +23,8 @@ import cv2
 import numpy as np
 from pathlib import Path
 
-from broadtrack.camera import project_points_batch, focal_from_hfov
-from broadtrack.camera_tracker import PITCH_CORNERS_3D
+from broadtrack.camera import project_points_batch
+from broadtrack.camera_tracker_sam import PITCH_CORNERS_3D
 
 
 # ─────────────────────────────────────────────────────
@@ -241,8 +241,7 @@ def run_test3_line_iou(frames_data, video_path, seg_model_path=None, sam_masks_d
         if is_tracked and has_rvec:
             rvec = np.array(cp["rvec"])
             position = np.array([cp["positionXMeters"], cp["positionYMeters"], cp["positionZMeters"]])
-            hfov = cp["horizontalFieldOfViewDegrees"]
-            focal = focal_from_hfov(hfov, frame_w)
+            focal = cp["focal"]
             params = np.zeros(8)
             params[0:3] = rvec
             params[3:6] = position

@@ -11,7 +11,7 @@ from broadtrack.camera import (
     project_wireframe,
     focal_from_hfov
 )
-from broadtrack.camera_tracker import PITCH_WIREFRAME
+from broadtrack.camera_tracker_sam import PITCH_WIREFRAME
 
 
 def rotation_matrix_pan_tilt_roll_cpp(pan_rad, tilt_rad, roll_rad):
@@ -98,8 +98,7 @@ def main():
             # Python tracker format — rvec is the angle-axis directly
             rvec = np.array(cp["rvec"], dtype=np.float64)
             position = np.array([cp["positionXMeters"], cp["positionYMeters"], cp["positionZMeters"]])
-            hfov = cp["horizontalFieldOfViewDegrees"]
-            focal_pixels = focal_from_hfov(hfov, w)
+            focal_pixels = cp["focal"]
             coeffs = cp.get("normalizedRadialDistortionCoefficients") or [0.0]
             dist = float(coeffs[0]) if len(coeffs) > 0 else 0.0
 
