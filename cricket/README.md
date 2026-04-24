@@ -233,6 +233,3 @@ Projection pipeline: world point → translate → rotate → normalize → dist
 ## Acknowledgements
 
 - [BroadTrack](https://github.com/evs-broadcast/BroadTrack) 
-- [Ultralytics YOLO](https://github.com/ultralytics/ultralytics) 
-- [SAM3 (Segment Anything Model 3)](https://github.com/facebookresearch/sam3) 
-- [CLIP](https://github.com/openai/CLIP) 
