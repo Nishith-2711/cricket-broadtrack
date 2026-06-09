@@ -36,6 +36,7 @@ evaluations_output/
 final_sam_outputs/
 sam_output_json/
 sam_vis/
+sam3/
 videos/
 output_jsons/
 .agents/

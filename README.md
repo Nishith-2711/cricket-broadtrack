@@ -1,6 +1,17 @@
 # Cricket BroadTrack
 
-Camera tracking system for cricket broadcast video. Detects and tracks the cricket pitch across frames using YOLO keypoint detection and a soft-tripod camera optimizer, with SAM3 segmentation for edge-based tracking when keypoints are partially occluded.
+A computer vision system for camera pose estimation and broadcast camera tracking in cricket videos using YOLO keypoint detection, geometric optimization, and SAM3-based edge tracking. The system estimates camera pose from cricket pitch keypoints and maintains robust tracking through occlusions using segmentation-guided optimization.
+
+---
+
+## Features
+
+- YOLO-based cricket pitch keypoint detection
+- 8-parameter camera pose optimization
+- Two-pass tripod-constrained tracking
+- SAM3 edge-based tracking during keypoint occlusion
+- Automatic fallback modes (LINES_PRIMARY, LINES_ONLY, COAST)
+- Reprojection error and Line-IoU evaluation
 
 ---
 
@@ -10,7 +21,7 @@ The pipeline runs in two passes:
 
 **Pass 1 — Free Tracking**
 - YOLO detects up to 8 pitch keypoints per frame (bowling/batting crease corners + popping crease corners)
-- PnP solves the initial camera pose from the first frameL
+- PnP solves the initial camera pose from the first frame
 - A per-frame optimizer (scipy `least_squares`, trust-region) minimizes reprojection error across all 8 camera parameters: rotation (angle-axis), position, focal length, and radial distortion
 - Camera position is soft-constrained to the previous frame to simulate a tripod
 
@@ -54,7 +65,7 @@ Keypoints (YOLO output order):
 ## Project Structure
 
 ```
-cricket/
+Cricket BroadTrack
 ├── src/broadtrack/                      # Core library
 │   ├── config.py                        # Pitch geometry constants
 │   ├── camera.py                        # Camera projection model (angle-axis + distortion)
@@ -108,7 +119,7 @@ Key dependencies:
 
 ## Usage
 
-All commands should be run from the `cricket/` directory.
+All commands should be run from the repository root.
 
 ### 2-Pass Pipeline — Manual (SAM-augmented)
 
